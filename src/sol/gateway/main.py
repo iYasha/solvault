@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from sol import __version__
 from sol.config import settings
 from sol.core.agent import create_agent
+from sol.core.llm import get_embeddings
 from sol.database import engine
 from sol.gateway.api.router import api_router
 from sol.logging_config import configure_logging
@@ -37,6 +38,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     app.state.agent = create_agent()
     log.info("sol.agent.ready", model=settings.llm.model)
+
+    app.state.embeddings = get_embeddings()
+    log.info("sol.memory.ready", embedding_model=settings.memory.embedding.model)
 
     write_pid_file(settings.data.pid_file)
     log.info("sol.started", host=settings.server.host, port=settings.server.port)

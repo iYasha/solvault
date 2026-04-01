@@ -23,10 +23,14 @@ sol telegram                             # start Telegram bot
 sol migrate                                              # apply all pending
 uv run alembic revision --autogenerate -m "description"  # create new migration
 
-# Tests
-uv run pytest tests/ -v              # all tests
-uv run pytest tests/unit/session/ -v # specific directory
+# Unit tests
+uv run pytest tests/unit/ -v              # all unit tests
+uv run pytest tests/unit/session/ -v      # specific directory
 uv run pytest tests/unit/session/test_manager.py::TestGetOrCreateSession::test_creates_new_session -v  # single test
+
+# Eval tests (require running LM Studio)
+uv run pytest tests/evals/ -v -s          # all evals
+uv run pytest tests/ -m "not eval" -v     # everything except evals
 
 # Linting (auto-runs via pre-commit on commit)
 uv run ruff check --fix .
@@ -38,15 +42,17 @@ uv run pre-commit run --all-files
 
 Sol is a privacy-first personal AI assistant. The package structure mirrors the component design in `docs/HIGH_LEVEL_DESIGN.md`:
 
-- **`gateway/`** — FastAPI server. Lifespan in `main.py` handles startup (WAL mode, PID file) and shutdown. API endpoints under `api/v1/`. Dependencies in `dependencies.py` provide `AsyncSession` via FastAPI's `Depends()`.
-- **`session/`** — SQLAlchemy ORM models (`Session`, `ChatMessage`), `SessionManager` for CRUD, `token_window.py` for tiktoken-based context compression.
+- **`core/`** — `Agent` class with `run()` (full response) and `run_stream()` (async generator). Uses `langchain-openai` `ChatOpenAI` for LM Studio. `create_agent()` factory wires LLM + system prompt. `AgentError` for LLM failures.
+- **`gateway/`** — FastAPI server. Lifespan in `main.py` handles startup (WAL mode, agent init, PID file) and shutdown. API endpoints under `api/v1/`. Dependencies in `dependencies.py` provide `AsyncSession` and `Agent` via FastAPI's `Depends()`.
+- **`session/`** — SQLAlchemy ORM models (`Session`, `ChatMessage`), `SessionManager` for CRUD, `token_window.py` for tiktoken-based context compression. `get_history(max_tokens=None)` returns all messages; pass `max_tokens` for LLM context windowing.
 - **`router/`** — `MessageRouter` normalizes channel-specific messages into a common format and resolves cross-channel user identity via config mappings.
-- **`channels/`** — Separate processes that connect to the gateway (Telegram via HTTP POST, CLI via WebSocket). Not in-process.
+- **`channels/`** — Separate processes that connect to the gateway. CLI (`sol chat`) uses WebSocket for streaming. Telegram (`sol telegram`) uses HTTP POST. Both are out-of-process.
 - **`config.py`** — Pydantic `BaseSettings` with custom `YamlSettingsSource` loading from `~/.sol/config.yaml`. Module-level `settings` singleton.
 - **`database.py`** — SQLAlchemy async engine (`sqlite+aiosqlite`), `Base` with naming conventions, `async_session` maker.
-- **`cli.py`** — Click CLI. Entry point registered as `sol` in pyproject.toml.
+- **`cli.py`** — Click CLI. Entry point registered as `sol` in pyproject.toml. `gateway` subgroup for server management, top-level `chat`/`telegram` commands.
+- **`logging_config.py`** — structlog with stdlib backend. Rotating file logs (`~/.sol/data/logs/sol.log`, 10MB, 5 backups) always active. Console output added when TTY.
 
-Planned but empty: `core/` (agent), `memory/` (RAG), `tools/`, `privacy/`, `skills/`, `scheduler/`.
+Planned but empty: `tools/`, `privacy/`, `skills/`, `scheduler/`.
 
 ## Key Patterns
 
@@ -54,9 +60,11 @@ Planned but empty: `core/` (agent), `memory/` (RAG), `tools/`, `privacy/`, `skil
 
 **Database**: SQLite with WAL mode (set in lifespan). Alembic migrations with `render_as_batch=True` (required for SQLite ALTER TABLE). Models register by importing in `alembic/env.py`.
 
-**Testing**: In-memory SQLite with session-scoped engine, per-test transaction rollback. API tests use `httpx.AsyncClient` with `ASGITransport`. DB dependency overridden via `app.dependency_overrides[get_db]`.
+**Testing**: In-memory SQLite with session-scoped engine, per-test transaction rollback. API tests use `httpx.AsyncClient` with `ASGITransport`. DB dependency overridden via `app.dependency_overrides[get_db]`. Agent mocked via `app.dependency_overrides[get_agent]`.
 
-**WebSocket protocol** (`/v1/ws`): Client sends `{"type": "message", "text": "..."}`, server responds with `{"type": "chunk", "text": "..."}` frames followed by `{"type": "done", "session_id": "..."}`.
+**WebSocket protocol** (`/v1/ws`): Client sends `{"type": "message", "text": "..."}`, server streams `{"type": "chunk", "text": "..."}` frames followed by `{"type": "done", "session_id": "..."}`. Error: `{"type": "error", "detail": "..."}`.
+
+**HTTP API**: `POST /v1/messages` routes a message, invokes the agent, returns `{session_id, message_id, response_text}`. `GET /v1/messages/{channel}/{user_id}/history` returns full chat history.
 
 ## Testing Guidelines
 
@@ -112,6 +120,45 @@ Mock external HTTP clients with `patch` + `AsyncMock`. Only mock the network bou
 2. Wait for user approval
 3. Implement all tests
 4. Run with `uv run pytest tests/path/to/test_file.py -v` and fix failures
+
+## Eval Tests
+
+Eval tests live in `tests/evals/` and use the LLM-as-a-Judge pattern to evaluate agent behavior end-to-end. They require a running LM Studio instance.
+
+### How it works
+
+1. Define an `EvalScenario` with `user_message`, `criteria`, optional `history` (prior conversation turns), and optional `seed_memories` (pre-loaded into DB)
+2. `run_turn()` calls the real `send_message()` endpoint handler — routing, history fetch, memory retrieval/injection, agent call, response saving, and background extraction all run through production code
+3. `judge()` sends the full context (history, response, extracted memories, criteria) to a judge LLM (temperature=0) which returns PASS/FAIL
+
+### Key components
+
+- **`tests/evals/conftest.py`** — Per-test fresh in-memory SQLite, real LLM/embeddings fixtures, `TokenTracker` callback for usage summary, `_patch_bg_session` to redirect background extraction to the test DB
+- **`tests/evals/harness.py`** — `EvalScenario`, `EvalResult`, `JudgeVerdict` dataclasses, `run_turn()` and `judge()` functions
+- **`tests/evals/test_memory_extraction.py`** — Evals for memory extraction quality
+- **`tests/evals/test_agent_response.py`** — Evals for response quality with memory recall and conversation history
+
+### Writing a new eval
+
+```python
+@pytest.mark.eval
+class TestMyFeature:
+    """Description of what is being evaluated."""
+
+    async def test_scenario(self, eval_db, eval_agent, eval_embeddings, eval_judge_llm):
+        """Given X, when Y, then Z."""
+        scenario = EvalScenario(
+            user_message="Hello, my name is Alice",
+            criteria=["A memory about the user's name is extracted"],
+            # Optional: history=[("user", "..."), ("assistant", "...")],
+            # Optional: seed_memories=[MemoryFact(content="...", type="user", confidence="confirmed")],
+        )
+        result = await run_turn(scenario, eval_agent, eval_db, eval_embeddings)
+        verdict = await judge(result, eval_judge_llm)
+        assert verdict.passed, f"Judge: {verdict.reason}\nAgent response: {result.response}"
+```
+
+All eval tests must be marked with `@pytest.mark.eval`. Token usage is printed at session end.
 
 ## Conventions
 

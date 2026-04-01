@@ -70,6 +70,30 @@ class TestAgentRun:
         assert isinstance(messages[3], SystemMessage), "Index 3 should be SystemMessage"
         assert isinstance(messages[4], HumanMessage), "Index 4 should be HumanMessage"
 
+    async def test_appends_memory_context_to_system_prompt(self):
+        """Given non-empty memory_context, when run called, then system prompt includes it."""
+        llm = _make_llm()
+        agent = Agent(llm=llm, system_prompt="Be helpful.")
+        history = [_make_message(Role.USER, "Hi")]
+
+        await agent.run(history, memory_context="\n\n## Memories\nUser likes Python")
+
+        messages = llm.ainvoke.call_args[0][0]
+        assert messages[0].content == "Be helpful.\n\n## Memories\nUser likes Python", (
+            "System prompt should have memory context appended"
+        )
+
+    async def test_ignores_empty_memory_context(self):
+        """Given empty memory_context, when run called, then system prompt is unchanged."""
+        llm = _make_llm()
+        agent = Agent(llm=llm, system_prompt="Be helpful.")
+        history = [_make_message(Role.USER, "Hi")]
+
+        await agent.run(history, memory_context="")
+
+        messages = llm.ainvoke.call_args[0][0]
+        assert messages[0].content == "Be helpful.", "System prompt should not change with empty context"
+
     async def test_raises_agent_error_on_failure(self):
         """Given LLM that raises, when run called, then AgentError is raised."""
         llm = AsyncMock()

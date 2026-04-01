@@ -20,6 +20,7 @@ dependencies = [
     "langchain-openai>=0.3",
     "aiogram>=3.0",
     "httpx>=0.27",
+    "sqlite-vec>=0.1.9",
 ]
 
 [project.scripts]
@@ -70,3 +71,6 @@ known-first-party = ["sol"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "eval: LLM evaluation tests requiring a running LM Studio instance (deselect with '-m not eval')",
+]

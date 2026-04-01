@@ -1,14 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException
+import structlog
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from langchain_openai import OpenAIEmbeddings
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sol.config import settings
 from sol.core.agent import Agent
 from sol.core.errors import AgentError
-from sol.gateway.dependencies import get_agent, get_db
+from sol.gateway.dependencies import get_agent, get_db, get_embeddings
 from sol.gateway.schemas import ChatMessageOut, IncomingMessageRequest, MessageResponse, SessionHistoryResponse
+from sol.memory.injector import MemoryInjector
+from sol.memory.retriever import MemoryRetriever
+from sol.memory.tasks import extract_memories
 from sol.router.message_router import IncomingMessage, MessageRouter
 from sol.session.manager import SessionManager
 from sol.session.models import ChannelType, Role
+
+log = structlog.get_logger()
 
 router = APIRouter()
 message_router = MessageRouter()
@@ -17,8 +24,10 @@ message_router = MessageRouter()
 @router.post("/messages", response_model=MessageResponse)
 async def send_message(
     body: IncomingMessageRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     agent: Agent = Depends(get_agent),
+    embeddings: OpenAIEmbeddings = Depends(get_embeddings),
 ) -> MessageResponse:
     message = IncomingMessage(
         channel=body.channel,
@@ -36,8 +45,17 @@ async def send_message(
         model=settings.llm.model,
     )
 
+    # Retrieve relevant memories and build context for system prompt
+    memory_context = ""
     try:
-        response_text = await agent.run(history)
+        retriever = MemoryRetriever(db=db, embeddings=embeddings, config=settings.memory)
+        results = await retriever.search(body.text)
+        memory_context = MemoryInjector().build_memory_context(results, settings.memory.injection_max_tokens)
+    except Exception:
+        log.warning("memory.retrieval_failed", exc_info=True)
+
+    try:
+        response_text = await agent.run(history, memory_context=memory_context)
     except AgentError as exc:
         raise HTTPException(status_code=502, detail="Agent failed to generate response.") from exc
 
@@ -48,6 +66,10 @@ async def send_message(
         model=settings.llm.model,
     )
     await db.commit()
+
+    # Fire-and-forget memory extraction
+    if settings.memory.extraction_enabled:
+        background_tasks.add_task(extract_memories, agent.llm, embeddings, body.text, response_text)
 
     return MessageResponse(
         session_id=session.id,

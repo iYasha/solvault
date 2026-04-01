@@ -5,7 +5,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_openai import ChatOpenAI
 
 from sol.core.errors import AgentError
-from sol.core.llm import create_llm
+from sol.core.llm import get_llm
 from sol.core.prompts import load_system_prompt
 from sol.session.models import ChatMessage, Role
 
@@ -23,9 +23,9 @@ class Agent:
         self.llm = llm
         self.system_prompt = system_prompt
 
-    async def run(self, history: list[ChatMessage]) -> str:
+    async def run(self, history: list[ChatMessage], memory_context: str = "") -> str:
         """Generate a complete response for the given conversation history."""
-        messages = self._build_messages(history)
+        messages = self._build_messages(history, memory_context)
         try:
             response = await self.llm.ainvoke(messages)
         except Exception as exc:
@@ -33,9 +33,9 @@ class Agent:
             raise AgentError(str(exc)) from exc
         return str(response.content)
 
-    async def run_stream(self, history: list[ChatMessage]) -> AsyncGenerator[str]:
+    async def run_stream(self, history: list[ChatMessage], memory_context: str = "") -> AsyncGenerator[str]:
         """Stream response chunks for the given conversation history."""
-        messages = self._build_messages(history)
+        messages = self._build_messages(history, memory_context)
         try:
             async for chunk in self.llm.astream(messages):
                 text = str(chunk.content) if chunk.content else ""
@@ -47,9 +47,10 @@ class Agent:
             log.error("agent.stream_failed", error=str(exc))
             raise AgentError(str(exc)) from exc
 
-    def _build_messages(self, history: list[ChatMessage]) -> list[BaseMessage]:
+    def _build_messages(self, history: list[ChatMessage], memory_context: str = "") -> list[BaseMessage]:
         """Convert ORM ChatMessage list to LangChain message format."""
-        lc_messages: list[BaseMessage] = [SystemMessage(content=self.system_prompt)]
+        prompt = self.system_prompt + memory_context if memory_context else self.system_prompt
+        lc_messages: list[BaseMessage] = [SystemMessage(content=prompt)]
         for msg in history:
             if msg.role == Role.USER:
                 lc_messages.append(HumanMessage(content=msg.content))
@@ -62,4 +63,4 @@ class Agent:
 
 def create_agent() -> Agent:
     """Create an Agent with the configured LLM and system prompt."""
-    return Agent(llm=create_llm(), system_prompt=load_system_prompt())
+    return Agent(llm=get_llm(), system_prompt=load_system_prompt())

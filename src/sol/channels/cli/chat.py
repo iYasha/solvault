@@ -3,16 +3,33 @@ import contextlib
 import functools
 import json
 import os
+import select
 import sys
 
 import httpx
 import websockets
+from websockets.exceptions import ConnectionClosed
 
 from sol.config import settings
 
+_PASTE_DEBOUNCE_SEC = 0.05
+_RECONNECT_DELAY_SEC = 2
+_MAX_RECONNECT_ATTEMPTS = 5
+
 
 def _read_input(prompt: str) -> str:
-    return input(prompt)
+    """Read user input, collecting multi-line pastes into a single string."""
+    first_line = input(prompt)
+    lines = [first_line]
+
+    # Drain any buffered lines that arrived from a paste
+    while select.select([sys.stdin], [], [], _PASTE_DEBOUNCE_SEC)[0]:
+        line = sys.stdin.readline()
+        if not line:
+            break
+        lines.append(line.rstrip("\n"))
+
+    return "\n".join(lines)
 
 
 async def _load_history(base_url: str, user_id: str) -> None:
@@ -36,46 +53,78 @@ async def _load_history(base_url: str, user_id: str) -> None:
     print()  # noqa: T201
 
 
+async def _send_and_stream(ws: websockets.ClientConnection, text: str) -> None:
+    """Send a message and stream the response."""
+    await ws.send(json.dumps({"type": "message", "text": text}))
+
+    sys.stdout.write("Sol: ")
+    sys.stdout.flush()
+
+    while True:
+        raw = await ws.recv()
+        frame = json.loads(raw)
+
+        if frame["type"] == "chunk":
+            sys.stdout.write(frame["text"])
+            sys.stdout.flush()
+        elif frame["type"] == "error":
+            sys.stdout.write(f"\n[Error: {frame.get('detail', 'Unknown error')}]")
+            break
+        elif frame["type"] == "done":
+            sys.stdout.write("\n\n")
+            sys.stdout.flush()
+            break
+
+
+async def _connect(ws_url: str, user_id: str) -> websockets.ClientConnection:
+    """Connect to the WebSocket with retry logic."""
+    url = f"{ws_url}?channel=cli&user_id={user_id}"
+    for attempt in range(_MAX_RECONNECT_ATTEMPTS):
+        try:
+            return await websockets.connect(url)
+        except (OSError, websockets.WebSocketException):
+            if attempt == _MAX_RECONNECT_ATTEMPTS - 1:
+                raise
+            delay = _RECONNECT_DELAY_SEC * (attempt + 1)
+            print(f"[Connection failed, retrying in {delay}s...]")  # noqa: T201
+            await asyncio.sleep(delay)
+    raise ConnectionError("Failed to connect")  # unreachable, satisfies type checker
+
+
 async def _chat_loop(ws_url: str, user_id: str) -> None:
     base_url = f"http://{settings.server.host}:{settings.server.port}"
     await _load_history(base_url, user_id)
 
-    async with websockets.connect(f"{ws_url}?channel=cli&user_id={user_id}") as ws:
-        print("Sol — type your message (Ctrl+C to exit)\n")  # noqa: T201
+    ws = await _connect(ws_url, user_id)
+    print("Sol — type your message (Ctrl+C to exit)\n")  # noqa: T201
 
-        loop = asyncio.get_event_loop()
-        while True:
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            user_input = await loop.run_in_executor(None, functools.partial(_read_input, "You: "))
+        except (EOFError, KeyboardInterrupt):
+            print()  # noqa: T201
+            break
+
+        if not user_input.strip():
+            continue
+
+        if user_input.strip() == "/exit":
+            break
+
+        try:
+            await _send_and_stream(ws, user_input)
+        except ConnectionClosed:
+            print("\n[Connection lost, reconnecting...]")  # noqa: T201
             try:
-                user_input = await loop.run_in_executor(None, functools.partial(_read_input, "You: "))
-            except (EOFError, KeyboardInterrupt):
-                print()  # noqa: T201
+                ws = await _connect(ws_url, user_id)
+                print("[Reconnected. Resending message...]\n")  # noqa: T201
+                await _send_and_stream(ws, user_input)
+            except (OSError, websockets.WebSocketException):
+                print("[Failed to reconnect. Exiting.]")  # noqa: T201
                 break
 
-            if not user_input.strip():
-                continue
-
-            if user_input.strip() == "/exit":
-                break
-
-            await ws.send(json.dumps({"type": "message", "text": user_input}))
-
-            sys.stdout.write("Sol: ")
-            sys.stdout.flush()
-
-            while True:
-                raw = await ws.recv()
-                frame = json.loads(raw)
-
-                if frame["type"] == "chunk":
-                    sys.stdout.write(frame["text"])
-                    sys.stdout.flush()
-                elif frame["type"] == "error":
-                    sys.stdout.write(f"\n[Error: {frame.get('detail', 'Unknown error')}]")
-                    break
-                elif frame["type"] == "done":
-                    sys.stdout.write("\n\n")
-                    sys.stdout.flush()
-                    break
+    await ws.close()
 
 
 def run_chat() -> None:

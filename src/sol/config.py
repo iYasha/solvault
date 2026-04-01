@@ -57,6 +57,24 @@ class IdentityConfig(BaseModel):
     mappings: list[IdentityMapping] = []
 
 
+class EmbeddingConfig(BaseModel):
+    endpoint: str = "http://localhost:1234/v1"
+    model: str = "nomic-embed-text-v2-moe"
+    api_key: str = ""
+    dimensions: int = 768
+
+
+class MemoryConfig(BaseModel):
+    embedding: EmbeddingConfig = EmbeddingConfig()
+    search_top_k: int = 10
+    injection_max_tokens: int = 5000
+    vector_weight: float = 0.7
+    text_weight: float = 0.3
+    extraction_enabled: bool = True
+    decay_half_life_days: int = 30
+    decaying_types: list[str] = ["work", "conversations", "events"]
+
+
 class YamlSettingsSource(PydanticBaseSettingsSource):
     """Load settings from ~/.sol/config.yaml."""
 
@@ -78,6 +96,7 @@ class SolSettings(BaseSettings):
     llm: LLMConfig = LLMConfig()
     channels: ChannelsConfig = ChannelsConfig()
     identity: IdentityConfig = IdentityConfig()
+    memory: MemoryConfig = MemoryConfig()
 
     @model_validator(mode="after")
     def ensure_data_dir(self) -> "SolSettings":
