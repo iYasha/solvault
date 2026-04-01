@@ -21,6 +21,10 @@ class DataConfig(BaseModel):
         return self.dir / "sol.db"
 
     @property
+    def logs_dir(self) -> Path:
+        return self.dir / "logs"
+
+    @property
     def pid_file(self) -> Path:
         return self.dir.parent / "sol.pid"
 
@@ -31,6 +35,7 @@ class LLMConfig(BaseModel):
     api_key: str = ""
     max_context_tokens: int = 100_000
     response_token_budget: int = 4096
+    system_prompt_file: str = ""
 
 
 class TelegramConfig(BaseModel):

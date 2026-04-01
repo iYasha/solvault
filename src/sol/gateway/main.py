@@ -9,6 +9,7 @@ from fastapi import FastAPI
 
 from sol import __version__
 from sol.config import settings
+from sol.core.agent import create_agent
 from sol.database import engine
 from sol.gateway.api.router import api_router
 from sol.logging_config import configure_logging
@@ -28,11 +29,14 @@ def remove_pid_file(path: str | os.PathLike) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
-    configure_logging(settings.server.log_level)
+    configure_logging(settings.server.log_level, log_dir=settings.data.logs_dir)
 
     # Enable SQLite WAL mode
     async with engine.begin() as conn:
         await conn.exec_driver_sql("PRAGMA journal_mode=WAL")
+
+    app.state.agent = create_agent()
+    log.info("sol.agent.ready", model=settings.llm.model)
 
     write_pid_file(settings.data.pid_file)
     log.info("sol.started", host=settings.server.host, port=settings.server.port)

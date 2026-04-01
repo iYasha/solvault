@@ -9,11 +9,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 uv sync
 
 # Run server
-sol start                        # background daemon
-sol start --foreground           # foreground (dev)
-sol start --foreground --reload  # foreground with auto-reload
-sol stop                         # stop daemon
-sol status                       # check if running
+sol gateway start                        # background daemon
+sol gateway start --foreground           # foreground (dev)
+sol gateway start --foreground --reload  # foreground with auto-reload
+sol gateway stop                         # stop daemon
+sol gateway status                       # check if running
+
+# Channels
+sol chat                                 # interactive CLI chat
+sol telegram                             # start Telegram bot
 
 # Database migrations
 sol migrate                                              # apply all pending

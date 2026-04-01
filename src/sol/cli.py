@@ -16,7 +16,12 @@ def cli() -> None:
     """Sol — privacy-first personal AI assistant."""
 
 
-@cli.command()
+@cli.group()
+def gateway() -> None:
+    """Manage the gateway server."""
+
+
+@gateway.command()
 @click.option("--foreground", "-f", is_flag=True, help="Run in the foreground instead of daemonizing")
 @click.option("--host", default=None, help="Bind host")
 @click.option("--port", default=None, type=int, help="Bind port")
@@ -49,10 +54,12 @@ def start(foreground: bool, host: str | None, port: int | None, reload: bool) ->
         except ProcessLookupError:
             pid_file.unlink()
 
-    log_file = settings.data.dir / "sol.log"
-    with open(log_file, "a") as lf:
+    logs_dir = settings.data.logs_dir
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    daemon_log = logs_dir / "daemon.log"
+    with open(daemon_log, "a") as lf:
         proc = subprocess.Popen(
-            [sys.executable, "-m", "sol.cli", "start", "--foreground"],
+            [sys.executable, "-m", "sol.cli", "gateway", "start", "--foreground"],
             stdout=lf,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -65,7 +72,7 @@ def start(foreground: bool, host: str | None, port: int | None, reload: bool) ->
         click.echo("Sol failed to start. Check ~/.sol/data/sol.log")
 
 
-@cli.command()
+@gateway.command()
 def stop() -> None:
     """Stop the running gateway server."""
     pid_file = settings.data.pid_file
@@ -83,7 +90,7 @@ def stop() -> None:
         pid_file.unlink()
 
 
-@cli.command()
+@gateway.command()
 def status() -> None:
     """Check if the gateway server is running."""
     pid_file = settings.data.pid_file
@@ -99,6 +106,28 @@ def status() -> None:
     except ProcessLookupError:
         click.echo("Sol is not running (stale PID file)")
         pid_file.unlink()
+
+
+@cli.command()
+def chat() -> None:
+    """Start an interactive chat session with Sol."""
+    from sol.channels.cli.chat import run_chat
+
+    run_chat()
+
+
+@cli.command()
+def telegram() -> None:
+    """Start the Telegram bot."""
+    import asyncio
+
+    if not settings.channels.telegram.bot_token:
+        click.echo("Error: Telegram bot_token not configured in ~/.sol/config.yaml")
+        return
+
+    from sol.channels.telegram.bot import start_bot
+
+    asyncio.run(start_bot())
 
 
 @cli.command()

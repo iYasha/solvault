@@ -53,11 +53,13 @@ class SessionManager:
     async def get_history(
         self,
         session_id: str,
-        max_tokens: int,
+        max_tokens: int | None = None,
         model: str = "gpt-4",
     ) -> list[ChatMessage]:
         result = await self.db.execute(
             sa.select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.timestamp.asc()),
         )
         messages = list(result.scalars().all())
-        return apply_token_window(messages, max_tokens, model)
+        if max_tokens is not None:
+            return apply_token_window(messages, max_tokens, model)
+        return messages
