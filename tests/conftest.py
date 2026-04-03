@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from sol.core.agent import Agent
 from sol.database import Base, VecConnection
-from sol.gateway.dependencies import get_agent, get_db, get_embeddings
+from sol.gateway.dependencies import get_agent, get_db
 from sol.gateway.main import app
 from sol.memory import models as _memory_models  # noqa: F401 — register models
 from sol.session import models as _models  # noqa: F401 — register models
@@ -67,15 +67,8 @@ async def client(db_session, mock_agent):
     async def _override_get_db():
         yield db_session
 
-    mock_embeddings = MagicMock()
-    mock_embeddings.aembed_query = AsyncMock(return_value=[0.0] * 768)
-
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_agent] = lambda: mock_agent
-    app.dependency_overrides[get_embeddings] = lambda: mock_embeddings
-
-    # Set app.state for components accessed directly (e.g., WebSocket endpoint)
-    app.state.embeddings = mock_embeddings
 
     async with AsyncClient(
         transport=ASGITransport(app=app),

@@ -53,6 +53,39 @@ async def _load_history(base_url: str, user_id: str) -> None:
     print()  # noqa: T201
 
 
+async def _handle_approval_request(ws: websockets.ClientConnection, frame: dict) -> None:
+    """Prompt the user for tool approval and send the response."""
+    tool_name = frame.get("tool", "unknown")
+    display = frame.get("display", "")
+    request_id = frame.get("request_id", "")
+
+    prompt_text = f"\n[Tool: {tool_name}]"
+    if display:
+        prompt_text += f" {display}"
+    prompt_text += "\nAllow? [y/N] "
+
+    sys.stdout.write(prompt_text)
+    sys.stdout.flush()
+
+    loop = asyncio.get_event_loop()
+    answer = await loop.run_in_executor(None, functools.partial(input, ""))
+    approved = answer.strip().lower() in ("y", "yes")
+
+    await ws.send(
+        json.dumps(
+            {
+                "type": "approval_response",
+                "request_id": request_id,
+                "approved": approved,
+            },
+        ),
+    )
+
+    status = "approved" if approved else "denied"
+    sys.stdout.write(f"[{status}]\n")
+    sys.stdout.flush()
+
+
 async def _send_and_stream(ws: websockets.ClientConnection, text: str) -> None:
     """Send a message and stream the response."""
     await ws.send(json.dumps({"type": "message", "text": text}))
@@ -67,6 +100,8 @@ async def _send_and_stream(ws: websockets.ClientConnection, text: str) -> None:
         if frame["type"] == "chunk":
             sys.stdout.write(frame["text"])
             sys.stdout.flush()
+        elif frame["type"] == "approval_request":
+            await _handle_approval_request(ws, frame)
         elif frame["type"] == "error":
             sys.stdout.write(f"\n[Error: {frame.get('detail', 'Unknown error')}]")
             break
@@ -92,7 +127,7 @@ async def _connect(ws_url: str, user_id: str) -> websockets.ClientConnection:
 
 
 async def _chat_loop(ws_url: str, user_id: str) -> None:
-    base_url = f"http://{settings.server.host}:{settings.server.port}"
+    base_url = f"http://{settings.gateway.host}:{settings.gateway.port}"
     await _load_history(base_url, user_id)
 
     ws = await _connect(ws_url, user_id)
@@ -129,7 +164,7 @@ async def _chat_loop(ws_url: str, user_id: str) -> None:
 
 def run_chat() -> None:
     """Start an interactive chat session over WebSocket."""
-    ws_url = f"ws://{settings.server.host}:{settings.server.port}/v1/ws"
+    ws_url = f"ws://{settings.gateway.host}:{settings.gateway.port}/v1/ws"
     user_id = os.getenv("USER", "anonymous")
 
     with contextlib.suppress(KeyboardInterrupt):

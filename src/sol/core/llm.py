@@ -23,3 +23,6 @@ def get_embeddings() -> OpenAIEmbeddings:
         dimensions=settings.memory.embedding.dimensions,
         check_embedding_ctx_length=False,
     )
+
+
+embeddings = get_embeddings()

@@ -1,19 +1,46 @@
+import json
 import os
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import click
 
 from sol import __version__
-from sol.config import settings
+from sol.config import SolSettings, settings
+
+_SOL_DIR = Path("~/.sol").expanduser()
 
 
 @click.group()
 @click.version_option(version=__version__, prog_name="sol")
 def cli() -> None:
     """Sol — privacy-first personal AI assistant."""
+
+
+@cli.command()
+@click.option("--force", is_flag=True, help="Overwrite existing config")
+def init(force: bool) -> None:
+    """Initialize ~/.sol directory with default config."""
+    _SOL_DIR.mkdir(parents=True, exist_ok=True)
+
+    config_file = _SOL_DIR / "config.json"
+    if config_file.exists() and not force:
+        click.echo(f"Config already exists: {config_file}")
+        click.echo("Use --force to overwrite.")
+        return
+
+    defaults = SolSettings.model_construct()
+    data = json.loads(defaults.model_dump_json())
+
+    with open(config_file, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+        f.write("\n")
+
+    click.echo(f"Created {config_file}")
+    click.echo("Edit it to configure Sol, then run: sol gateway start")
 
 
 @cli.group()
@@ -36,8 +63,8 @@ def start(foreground: bool, host: str | None, port: int | None, reload: bool) ->
 
         uvicorn.run(
             "sol.gateway.main:app",
-            host=host or settings.server.host,
-            port=port or settings.server.port,
+            host=host or settings.gateway.host,
+            port=port or settings.gateway.port,
             log_config=None,
             access_log=False,
             reload=reload,

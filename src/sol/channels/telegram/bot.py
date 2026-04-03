@@ -13,7 +13,7 @@ async def handle_message(message: types.Message, bot: Bot) -> None:
     if not message.text:
         return
 
-    gateway_url = f"http://{settings.server.host}:{settings.server.port}/v1/messages"
+    gateway_url = f"http://{settings.gateway.host}:{settings.gateway.port}/v1/messages"
 
     await bot.send_chat_action(chat_id=message.chat.id, action=ChatAction.TYPING)
 

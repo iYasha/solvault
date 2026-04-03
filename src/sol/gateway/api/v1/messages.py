@@ -1,12 +1,12 @@
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from langchain_openai import OpenAIEmbeddings
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sol.config import settings
 from sol.core.agent import Agent
 from sol.core.errors import AgentError
-from sol.gateway.dependencies import get_agent, get_db, get_embeddings
+from sol.core.llm import embeddings
+from sol.gateway.dependencies import get_agent, get_db
 from sol.gateway.schemas import ChatMessageOut, IncomingMessageRequest, MessageResponse, SessionHistoryResponse
 from sol.memory.injector import MemoryInjector
 from sol.memory.retriever import MemoryRetriever
@@ -14,6 +14,7 @@ from sol.memory.tasks import extract_memories
 from sol.router.message_router import IncomingMessage, MessageRouter
 from sol.session.manager import SessionManager
 from sol.session.models import ChannelType, Role
+from sol.tools import DenyAllApprovalCallback
 
 log = structlog.get_logger()
 
@@ -27,7 +28,6 @@ async def send_message(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     agent: Agent = Depends(get_agent),
-    embeddings: OpenAIEmbeddings = Depends(get_embeddings),
 ) -> MessageResponse:
     message = IncomingMessage(
         channel=body.channel,
@@ -45,7 +45,6 @@ async def send_message(
         model=settings.llm.model,
     )
 
-    # Retrieve relevant memories and build context for system prompt
     memory_context = ""
     try:
         retriever = MemoryRetriever(db=db, embeddings=embeddings, config=settings.memory)
@@ -55,7 +54,11 @@ async def send_message(
         log.warning("memory.retrieval_failed", exc_info=True)
 
     try:
-        response_text = await agent.run(history, memory_context=memory_context)
+        response_text = await agent.run(
+            history,
+            memory_context=memory_context,
+            approval_callback=DenyAllApprovalCallback(),
+        )
     except AgentError as exc:
         raise HTTPException(status_code=502, detail="Agent failed to generate response.") from exc
 
@@ -67,7 +70,6 @@ async def send_message(
     )
     await db.commit()
 
-    # Fire-and-forget memory extraction
     if settings.memory.extraction_enabled:
         background_tasks.add_task(extract_memories, agent.llm, embeddings, body.text, response_text)
 

@@ -3,11 +3,11 @@ import contextlib
 
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from langchain_openai import OpenAIEmbeddings
 
 from sol.config import settings
 from sol.core.agent import Agent
 from sol.core.errors import AgentError
+from sol.core.llm import embeddings
 from sol.database import async_session
 from sol.memory.injector import MemoryInjector
 from sol.memory.retriever import MemoryRetriever
@@ -15,6 +15,7 @@ from sol.memory.tasks import extract_memories
 from sol.router.message_router import IncomingMessage, MessageRouter
 from sol.session.manager import SessionManager
 from sol.session.models import ChannelType, Role
+from sol.tools import WebSocketApprovalCallback
 
 router = APIRouter()
 log = structlog.get_logger()
@@ -23,16 +24,16 @@ log = structlog.get_logger()
 class ChatSession:
     """Manages a single WebSocket chat session: routing, memory, streaming, extraction."""
 
-    _background_tasks: set[asyncio.Task] = set()
-
     def __init__(self, websocket: WebSocket, channel: ChannelType, user_id: str) -> None:
         self.websocket = websocket
         self.channel = channel
         self.user_id = user_id
         self.agent: Agent = websocket.app.state.agent
-        self.embeddings: OpenAIEmbeddings = websocket.app.state.embeddings
+        self.embeddings = embeddings
         self.message_router = MessageRouter()
         self.max_history_tokens = settings.llm.max_context_tokens - settings.llm.response_token_budget
+        self.approval_callback = WebSocketApprovalCallback(websocket, timeout=settings.tools.approval_timeout)
+        self._background_tasks: set[asyncio.Task[None]] = set()
 
     async def handle_message(self, text: str) -> None:
         """Process a single message: route, retrieve memories, stream response, save."""
@@ -76,7 +77,11 @@ class ChatSession:
         """Stream agent response chunks over WebSocket. Returns full response or None on error."""
         full_response = ""
         try:
-            async for chunk in self.agent.run_stream(history, memory_context=memory_context):
+            async for chunk in self.agent.run_stream(
+                history,
+                memory_context=memory_context,
+                approval_callback=self.approval_callback,
+            ):
                 full_response += chunk
                 await self.websocket.send_json({"type": "chunk", "text": chunk})
         except AgentError as exc:
@@ -124,25 +129,43 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     chat = ChatSession(websocket, channel_type, user_id)
 
     try:
-        while True:
-            data = await websocket.receive_json()
-
-            if data.get("type") == "ping":
-                await websocket.send_json({"type": "pong"})
-                continue
-
-            if data.get("type") != "message":
-                continue
-
-            text = data.get("text", "")
-            if not text:
-                continue
-
-            await chat.handle_message(text)
-
+        await _receive_loop(websocket, chat)
     except WebSocketDisconnect:
         log.info("ws.disconnected", channel=channel_str, user_id=user_id)
     except Exception as e:
         log.error("ws.error", error=str(e))
         with contextlib.suppress(Exception):
             await websocket.send_json({"type": "error", "detail": str(e)})
+
+
+async def _receive_loop(websocket: WebSocket, chat: ChatSession) -> None:
+    """WebSocket receive loop that handles messages and approval responses concurrently."""
+    message_task: asyncio.Task | None = None
+
+    while True:
+        data = await websocket.receive_json()
+        frame_type = data.get("type")
+
+        if frame_type == "ping":
+            await websocket.send_json({"type": "pong"})
+            continue
+
+        if frame_type == "approval_response":
+            chat.approval_callback.resolve(
+                data.get("request_id", ""),
+                data.get("approved", False),
+            )
+            continue
+
+        if frame_type != "message":
+            continue
+
+        text = data.get("text", "")
+        if not text:
+            continue
+
+        if message_task and not message_task.done():
+            await websocket.send_json({"type": "error", "detail": "A message is already being processed."})
+            continue
+
+        message_task = asyncio.create_task(chat.handle_message(text))
